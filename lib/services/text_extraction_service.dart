@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
 
 /// 文本提取服务
 /// 使用豆包模型从图片中提取朗读内容文字
@@ -63,6 +64,7 @@ class TextExtractionService {
   Future<String?> extractTextFromCameraImage(CameraImage cameraImage) async {
     try {
       onStatusChanged?.call('正在处理图像...');
+      debugPrint('$_tag: 开始处理相机图像 - 格式: ${cameraImage.format.group}, 尺寸: ${cameraImage.width}x${cameraImage.height}');
       
       // 将CameraImage转换为Uint8List
       final imageBytes = await _convertCameraImageToBytes(cameraImage);
@@ -70,8 +72,19 @@ class TextExtractionService {
         throw Exception('图像转换失败');
       }
       
+      debugPrint('$_tag: 图像转换成功 - JPEG字节数: ${imageBytes.length}');
+      
+      // 验证JPEG格式
+      if (imageBytes.length < 10 || 
+          imageBytes[0] != 0xFF || imageBytes[1] != 0xD8) {
+        debugPrint('$_tag: 警告：生成的数据可能不是有效的JPEG格式');
+      } else {
+        debugPrint('$_tag: JPEG格式验证通过');
+      }
+      
       // 转换为base64
       final base64Image = base64Encode(imageBytes);
+      debugPrint('$_tag: Base64编码完成 - 长度: ${base64Image.length}');
       
       // 调用豆包模型API
       final extractedText = await _callDoubaoAPI(base64Image);
@@ -220,52 +233,123 @@ class TextExtractionService {
   
   /// 将YUV420格式转换为JPEG
   Uint8List _convertYUV420ToJPEG(CameraImage cameraImage) {
-    final int width = cameraImage.width;
-    final int height = cameraImage.height;
-    final int ySize = width * height;
-    final int uvSize = ySize ~/ 4;
-    
-    final Uint8List yuvBytes = Uint8List(ySize + uvSize * 2);
-    
-    // Y plane
-    final yPlane = cameraImage.planes[0];
-    yuvBytes.setRange(0, ySize, yPlane.bytes);
-    
-    // U and V planes
-    final uPlane = cameraImage.planes[1];
-    final vPlane = cameraImage.planes[2];
-    
-    for (int i = 0; i < uvSize; i++) {
-      yuvBytes[ySize + i] = uPlane.bytes[i];
-      yuvBytes[ySize + uvSize + i] = vPlane.bytes[i];
+    try {
+      final width = cameraImage.width;
+      final height = cameraImage.height;
+      
+      // 创建RGB图像
+      final image = img.Image(width: width, height: height);
+      
+      final yPlane = cameraImage.planes[0];
+      final uPlane = cameraImage.planes[1];
+      final vPlane = cameraImage.planes[2];
+      
+      final yData = yPlane.bytes;
+      final uData = uPlane.bytes;
+      final vData = vPlane.bytes;
+      
+      // YUV420转RGB
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          final yIndex = y * yPlane.bytesPerRow + x;
+          final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x ~/ 2);
+          
+          if (yIndex < yData.length && uvIndex < uData.length && uvIndex < vData.length) {
+            final yValue = yData[yIndex];
+            final uValue = uData[uvIndex] - 128;
+            final vValue = vData[uvIndex] - 128;
+            
+            // YUV到RGB转换
+            int r = (yValue + 1.402 * vValue).round().clamp(0, 255);
+            int g = (yValue - 0.344136 * uValue - 0.714136 * vValue).round().clamp(0, 255);
+            int b = (yValue + 1.772 * uValue).round().clamp(0, 255);
+            
+            image.setPixelRgb(x, y, r, g, b);
+          }
+        }
+      }
+      
+      // 编码为JPEG
+      final jpegBytes = img.encodeJpg(image, quality: 85);
+      return Uint8List.fromList(jpegBytes);
+    } catch (e) {
+      debugPrint('$_tag: YUV420转JPEG失败 - $e');
+      // 降级方案：使用Y通道作为灰度图
+      return _convertYUV420ToGrayscaleJPEG(cameraImage);
     }
-    
-    // 这里简化处理，实际应用中可能需要使用图像处理库
-    // 返回Y通道作为灰度图像的简化版本
-    return yuvBytes.sublist(0, ySize);
   }
   
   /// 将BGRA8888格式转换为JPEG
   Uint8List _convertBGRA8888ToJPEG(CameraImage cameraImage) {
-    final bytes = cameraImage.planes[0].bytes;
-    final width = cameraImage.width;
-    final height = cameraImage.height;
-    
-    // 转换BGRA到RGB
-    final rgbBytes = Uint8List(width * height * 3);
-    for (int i = 0; i < bytes.length; i += 4) {
-      final b = bytes[i];
-      final g = bytes[i + 1];
-      final r = bytes[i + 2];
-      // 跳过Alpha通道
+    try {
+      final bytes = cameraImage.planes[0].bytes;
+      final width = cameraImage.width;
+      final height = cameraImage.height;
       
-      final pixelIndex = i ~/ 4;
-      rgbBytes[pixelIndex * 3] = r;
-      rgbBytes[pixelIndex * 3 + 1] = g;
-      rgbBytes[pixelIndex * 3 + 2] = b;
+      // 创建RGB图像
+      final image = img.Image(width: width, height: height);
+      
+      // 转换BGRA到RGB
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          final pixelIndex = (y * width + x) * 4;
+          
+          if (pixelIndex + 3 < bytes.length) {
+            final b = bytes[pixelIndex];
+            final g = bytes[pixelIndex + 1];
+            final r = bytes[pixelIndex + 2];
+            // Alpha通道在pixelIndex + 3，我们忽略它
+            
+            image.setPixelRgb(x, y, r, g, b);
+          }
+        }
+      }
+      
+      // 编码为JPEG
+      final jpegBytes = img.encodeJpg(image, quality: 85);
+      return Uint8List.fromList(jpegBytes);
+    } catch (e) {
+      debugPrint('$_tag: BGRA8888转JPEG失败 - $e');
+      // 降级方案：创建空白图像
+      final image = img.Image(width: 640, height: 480);
+      img.fill(image, color: img.ColorRgb8(128, 128, 128));
+      final jpegBytes = img.encodeJpg(image);
+      return Uint8List.fromList(jpegBytes);
     }
-    
-    return rgbBytes;
+  }
+
+  /// YUV420转灰度JPEG（降级方案）
+  Uint8List _convertYUV420ToGrayscaleJPEG(CameraImage cameraImage) {
+    try {
+      final width = cameraImage.width;
+      final height = cameraImage.height;
+      final yPlane = cameraImage.planes[0];
+      
+      // 创建灰度图像
+      final image = img.Image(width: width, height: height);
+      
+      // 使用Y通道作为灰度值
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          final yIndex = y * yPlane.bytesPerRow + x;
+          if (yIndex < yPlane.bytes.length) {
+            final grayValue = yPlane.bytes[yIndex];
+            image.setPixelRgb(x, y, grayValue, grayValue, grayValue);
+          }
+        }
+      }
+      
+      // 编码为JPEG
+      final jpegBytes = img.encodeJpg(image, quality: 85);
+      return Uint8List.fromList(jpegBytes);
+    } catch (e) {
+      debugPrint('$_tag: 灰度图转换失败 - $e');
+      // 最后的降级方案：创建空白图像
+      final image = img.Image(width: 640, height: 480);
+      img.fill(image, color: img.ColorRgb8(128, 128, 128));
+      final jpegBytes = img.encodeJpg(image);
+      return Uint8List.fromList(jpegBytes);
+    }
   }
   
   /// 处理提取的文本（可以添加文本后处理逻辑）
