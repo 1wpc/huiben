@@ -29,6 +29,8 @@ class _ReadingPageState extends State<ReadingPage> {
   String _lastDetectionTime = '';
   String _extractedText = ''; // 存储提取的文本
   bool _isTextExtractionEnabled = false; // 文本提取服务是否可用
+  bool _useHsvDetection = false; // HSV检测开关
+  double _currentHsvSimilarity = 0.0; // HSV相似度
 
   @override
   void initState() {
@@ -127,7 +129,9 @@ class _ReadingPageState extends State<ReadingPage> {
       Future.delayed(const Duration(seconds: 3), () {
         if (_isReading && mounted) {
           setState(() {
-            _statusText = '智能翻页检测中 - 正在静默监测翻页动作';
+            _statusText = _isModelLoaded 
+              ? '智能翻页检测中 (ONNX模式) - 正在静默监测翻页动作'
+              : '智能翻页检测中 (HSV备用模式) - 正在静默监测翻页动作';
           });
         }
       });
@@ -136,6 +140,8 @@ class _ReadingPageState extends State<ReadingPage> {
     _pageTurnDetector!.onSimilarityUpdated = (similarity) {
       setState(() {
         _currentSimilarity = similarity;
+        // 同时获取HSV相似度
+        _currentHsvSimilarity = _pageTurnDetector!.lastHsvSimilarity;
       });
     };
     
@@ -168,23 +174,37 @@ class _ReadingPageState extends State<ReadingPage> {
 
     // 初始化模型
     final success = await _pageTurnDetector!.initModel();
+    
+    // 如果模型加载失败，启用HSV检测作为备用方案
+    if (!success) {
+      _useHsvDetection = true;
+      _pageTurnDetector!.setUseHsvDetection(true);
+      debugPrint('ONNX模型加载失败，启用HSV检测备用方案');
+    }
+    
     setState(() {
       _isModelLoaded = success;
       if (success) {
-        _statusText = '翻页检测已就绪';
+        _statusText = '翻页检测已就绪 (ONNX模式)';
+      } else if (_useHsvDetection) {
+        _statusText = '翻页检测已就绪 (HSV备用模式)';
+      } else {
+        _statusText = '翻页检测不可用';
       }
     });
   }
 
   void _startReading() {
-    if (!_isInitialized || !_isModelLoaded) {
+    if (!_isInitialized || (!_isModelLoaded && !_useHsvDetection)) {
       _showErrorDialog('请等待系统初始化完成');
       return;
     }
 
     setState(() {
       _isReading = true;
-      _statusText = '智能翻页检测中 - 正在静默监测翻页动作';
+      _statusText = _isModelLoaded 
+        ? '智能翻页检测中 (ONNX模式) - 正在静默监测翻页动作'
+        : '智能翻页检测中 (HSV备用模式) - 正在静默监测翻页动作';
       _pageCount = 1;
       _lastDetectionTime = ''; // 重置检测时间
     });
@@ -308,19 +328,28 @@ class _ReadingPageState extends State<ReadingPage> {
                         children: [
                           const Icon(Icons.analytics, color: Colors.orange),
                           const SizedBox(height: 4),
-                          Text('相似度: ${(_currentSimilarity * 100).toStringAsFixed(1)}%',
-                               style: const TextStyle(fontSize: 12)),
+                          Text(
+                            _isModelLoaded 
+                              ? 'ONNX: ${(_currentSimilarity * 100).toStringAsFixed(1)}%'
+                              : 'HSV: ${(_currentHsvSimilarity * 100).toStringAsFixed(1)}%',
+                            style: const TextStyle(fontSize: 12)
+                          ),
                         ],
                       ),
                       Column(
                         children: [
                           Icon(
-                            _isModelLoaded ? Icons.check_circle : Icons.error,
-                            color: _isModelLoaded ? Colors.green : Colors.red,
+                            _isModelLoaded ? Icons.check_circle : 
+                            (_useHsvDetection ? Icons.backup : Icons.error),
+                            color: _isModelLoaded ? Colors.green : 
+                                   (_useHsvDetection ? Colors.orange : Colors.red),
                           ),
                           const SizedBox(height: 4),
-                          Text(_isModelLoaded ? '模型就绪' : '模型未加载',
-                               style: const TextStyle(fontSize: 12)),
+                          Text(
+                            _isModelLoaded ? 'ONNX模式' : 
+                            (_useHsvDetection ? 'HSV模式' : '模型未加载'),
+                            style: const TextStyle(fontSize: 12)
+                          ),
                         ],
                       ),
                       Column(
@@ -366,13 +395,17 @@ class _ReadingPageState extends State<ReadingPage> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('页面稳定度:', style: TextStyle(fontSize: 12)),
+                      Text(
+                        _isModelLoaded ? 'ONNX稳定度:' : 'HSV稳定度:', 
+                        style: const TextStyle(fontSize: 12)
+                      ),
                       const SizedBox(height: 4),
                       LinearProgressIndicator(
-                        value: _currentSimilarity,
+                        value: _isModelLoaded ? _currentSimilarity : (_currentHsvSimilarity / 2.0), // HSV值需要调整显示范围
                         backgroundColor: Colors.grey[300],
                         valueColor: AlwaysStoppedAnimation<Color>(
-                          _currentSimilarity > 0.7 ? Colors.green : Colors.orange,
+                          (_isModelLoaded ? _currentSimilarity : (_currentHsvSimilarity / 2.0)) > 0.7 
+                            ? Colors.green : Colors.orange,
                         ),
                       ),
                     ],

@@ -5,16 +5,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:onnxruntime/onnxruntime.dart';
+import 'package:image/image.dart' as img;
 import 'text_extraction_service.dart';
 
 /// 翻页检测服务
 /// 使用 MobileNetV2 模型提取图像特征，通过比较特征向量检测翻页
+/// 同时支持HSV特征检测作为备用方案（适用于鸿蒙平台）
 class PageTurnDetector {
   static const String _tag = 'PageTurnDetector';
   static const int _inputSize = 224; // MobileNetV2输入尺寸
   static const double _similarityThreshold = 0.7; // 相似度阈值
   static const int _maxFrameSkip = 10; // 最大跳帧数（控制处理频率）
   static const int _maxProcessingTime = 500; // 最大处理时间（毫秒）
+  
+  // HSV检测相关常量
+  static const double _hsvThreshold = 0.15; // HSV相似度阈值（0-1，值越大差异越大）
+  static const int _histogramBins = 50; // 直方图bin数量
   
   // ONNX Runtime 相关
   OrtSession? _session;
@@ -25,6 +31,11 @@ class PageTurnDetector {
   bool _isProcessing = false; // 防止异步累积
   List<double>? _previousFeature;
   double _currentSimilarity = 1.0;
+  
+  // HSV检测相关状态
+  img.Image? _previousImage; // 保存上一帧图像用于HSV比较
+  double _currentHsvSimilarity = 0.0; // HSV相似度
+  bool _useHsvDetection = false; // 是否启用HSV检测
   
   // 帧率控制
   int _frameCounter = 0;
@@ -63,6 +74,12 @@ class PageTurnDetector {
     };
     
     debugPrint('$_tag: 文本提取服务已设置');
+  }
+
+  /// 设置是否使用HSV检测（备用方案，适用于鸿蒙等不支持ONNX的平台）
+  void setUseHsvDetection(bool useHsv) {
+    _useHsvDetection = useHsv;
+    debugPrint('$_tag: HSV检测已${useHsv ? "启用" : "禁用"}');
   }
 
   /// 初始化模型
@@ -145,25 +162,8 @@ class PageTurnDetector {
       
       final startTime = DateTime.now();
       
-      // 启动一个计时器来定期报告进度
-      final progressTimer = Timer.periodic(Duration(seconds: 5), (timer) {
-        final elapsed = DateTime.now().difference(startTime).inSeconds;
-        debugPrint('$_tag: 推理进行中... 已耗时: ${elapsed}秒');
-      });
-      
-      // final future = _session!.runAsync(OrtRunOptions(), inputs);
-      // if (future == null) {
-      //   progressTimer.cancel();
-      //   throw Exception('ONNX推理返回null');
-      // }
-      
-      debugPrint('$_tag: runAsync调用成功，等待结果...');
-      
-      // 移除timeout，让它自然完成
+      // 调用ONNX推理
       final outputs = await _session!.runAsync(OrtRunOptions(), inputs);
-      
-      // 停止进度计时器
-      progressTimer.cancel();
       
       final endTime = DateTime.now();
       final duration = endTime.difference(startTime).inMilliseconds;
@@ -206,19 +206,31 @@ class PageTurnDetector {
 
   /// 开始翻页检测
   void startDetection() {
-    if (!_isModelLoaded) {
-      debugPrint('$_tag: 模型未加载，无法开始检测');
+    if (!_isModelLoaded && !_useHsvDetection) {
+      debugPrint('$_tag: 模型未加载且HSV检测未启用，无法开始检测');
       return;
     }
     
     _isDetecting = true;
     _isProcessing = false;
     _previousFeature = null;
+    _previousImage = null;
     _currentSimilarity = 1.0;
+    _currentHsvSimilarity = 0.0;
     _frameCounter = 0;
     _lastProcessTime = null;
-    onStatusChanged?.call('翻页检测已启动');
-    debugPrint('$_tag: 开始翻页检测');
+    
+    String detectionMode = '';
+    if (_isModelLoaded && _useHsvDetection) {
+      detectionMode = '(ONNX+HSV模式)';
+    } else if (_isModelLoaded) {
+      detectionMode = '(ONNX模式)';
+    } else if (_useHsvDetection) {
+      detectionMode = '(HSV模式)';
+    }
+    
+    onStatusChanged?.call('翻页检测已启动$detectionMode');
+    debugPrint('$_tag: 开始翻页检测$detectionMode');
   }
 
   /// 停止翻页检测
@@ -226,7 +238,9 @@ class PageTurnDetector {
     _isDetecting = false;
     _isProcessing = false;
     _previousFeature = null;
+    _previousImage = null;
     _currentSimilarity = 1.0;
+    _currentHsvSimilarity = 0.0;
     _frameCounter = 0;
     _lastProcessTime = null;
     onStatusChanged?.call('翻页检测已停止');
@@ -235,7 +249,7 @@ class PageTurnDetector {
 
   /// 处理相机帧进行翻页检测（优化版本）
   Future<void> processFrame(CameraImage cameraImage) async {
-    if (!_isDetecting || !_isModelLoaded || _session == null) {
+    if (!_isDetecting || (!_isModelLoaded && !_useHsvDetection) || (_session == null && !_useHsvDetection)) {
       return;
     }
 
@@ -274,52 +288,78 @@ class PageTurnDetector {
     print('$_tag: 开始处理帧...');
 
     try {
-      // 添加超时控制
-      print('$_tag: 调用 _processFrameInternal...');
-      final result = await _processFrameInternal(cameraImage).timeout(
-        Duration(milliseconds: _maxProcessingTime),
-        onTimeout: () {
-          _consecutiveTimeouts++;
-          print('$_tag: 处理超时! 连续超时次数: $_consecutiveTimeouts');
-          
-          // 如果连续超时超过3次，重新初始化模型
-          if (_consecutiveTimeouts >= 3) {
-            print('$_tag: 连续超时过多，将重新初始化模型');
-            _scheduleModelReinit();
-          }
-          
-          return null;
-        },
-      );
+      List<double>? result;
       
-      print('$_tag: _processFrameInternal 返回结果: ${result != null ? "成功" : "失败"}');
-      
-      if (result != null) {
-        // 检测页面是否变化
-        final isPageChanged = _isPageChangedFeature(_previousFeature, result);
+      // 只有在模型加载时才进行ONNX推理
+      if (_isModelLoaded && _session != null) {
+        print('$_tag: 调用 _processFrameInternal...');
+        result = await _processFrameInternal(cameraImage).timeout(
+          Duration(milliseconds: _maxProcessingTime),
+          onTimeout: () {
+            _consecutiveTimeouts++;
+            print('$_tag: 处理超时! 连续超时次数: $_consecutiveTimeouts');
+            
+            // 如果连续超时超过3次，重新初始化模型
+            if (_consecutiveTimeouts >= 3) {
+              print('$_tag: 连续超时过多，将重新初始化模型');
+              _scheduleModelReinit();
+            }
+            
+            return null;
+          },
+        );
         
-        if (isPageChanged) {
-          print('$_tag: 检测到翻页动作，相似度: ${_currentSimilarity.toStringAsFixed(3)}');
-          onPageTurnDetected?.call('检测到翻页动作');
-          
-          // 自动进行文本提取
-          _performTextExtraction();
+        print('$_tag: _processFrameInternal 返回结果: ${result != null ? "成功" : "失败"}');
+      }
+      
+      // 检测逻辑：结合ONNX特征检测和HSV检测
+      bool isPageChangedFeature = false;
+      bool isPageChangedHSV = false;
+      
+      // ONNX特征检测
+      if (result != null && _isModelLoaded) {
+        isPageChangedFeature = _isPageChangedFeature(_previousFeature, result);
+        _previousFeature = result;
+      }
+      
+      // HSV特征检测（如果启用）
+      if (_useHsvDetection) {
+        final currentImage = await _convertCameraImageToImage(cameraImage);
+        if (currentImage != null) {
+          isPageChangedHSV = _isPageChangedHSV(_previousImage, currentImage);
+          _previousImage = currentImage;
+        }
+      }
+      
+      // 综合判断：任一方式检测到翻页都认为是翻页
+      final isPageChanged = isPageChangedFeature || isPageChangedHSV;
+      
+      if (isPageChanged) {
+        String detectionMethod = '';
+        if (isPageChangedFeature && isPageChangedHSV) {
+          detectionMethod = 'ONNX+HSV';
+        } else if (isPageChangedFeature) {
+          detectionMethod = 'ONNX';
+        } else if (isPageChangedHSV) {
+          detectionMethod = 'HSV';
         }
         
-        // 回调相似度更新
-        onSimilarityUpdated?.call(_currentSimilarity);
+        print('$_tag: 检测到翻页动作 ($detectionMethod) - ONNX相似度: ${_currentSimilarity.toStringAsFixed(3)}, HSV相似度: ${_currentHsvSimilarity.toStringAsFixed(3)}');
+        onPageTurnDetected?.call('检测到翻页动作 ($detectionMethod)');
         
-        // 打印处理完成的相似度
-        print('$_tag: 处理完成 - 相似度: ${_currentSimilarity.toStringAsFixed(3)}, 是否翻页: $isPageChanged');
-        
-        // 更新前一帧特征
-        _previousFeature = result;
-        
-        // 处理成功，重置超时计数
-        _consecutiveTimeouts = 0;
-      } else {
-        print('$_tag: 处理结果为空');
+        // 自动进行文本提取
+        _performTextExtraction();
       }
+      
+      // 回调相似度更新（优先使用ONNX，其次使用HSV）
+      final displaySimilarity = _isModelLoaded ? _currentSimilarity : _currentHsvSimilarity;
+      onSimilarityUpdated?.call(displaySimilarity);
+      
+      // 打印处理完成的信息
+      print('$_tag: 处理完成 - ONNX相似度: ${_currentSimilarity.toStringAsFixed(3)}, HSV相似度: ${_currentHsvSimilarity.toStringAsFixed(3)}, 是否翻页: $isPageChanged');
+      
+      // 处理成功，重置超时计数
+      _consecutiveTimeouts = 0;
       
     } catch (e) {
       print('$_tag: 处理帧异常 - ${e.runtimeType}: $e');
@@ -621,6 +661,183 @@ class PageTurnDetector {
     return similarity < _similarityThreshold;
   }
 
+  /// 将CameraImage转换为Image对象（用于HSV处理）
+  Future<img.Image?> _convertCameraImageToImage(CameraImage cameraImage) async {
+    try {
+      img.Image? image;
+      
+      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
+        // YUV420转换为RGB
+        final yPlane = cameraImage.planes[0];
+        final uPlane = cameraImage.planes[1];
+        final vPlane = cameraImage.planes[2];
+        
+        final width = cameraImage.width;
+        final height = cameraImage.height;
+        
+        // 创建RGB图像
+        image = img.Image(width: width, height: height);
+        
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final yIndex = y * yPlane.bytesPerRow + x;
+            final uvIndex = (y ~/ 2) * uPlane.bytesPerRow + (x ~/ 2);
+            
+            if (yIndex < yPlane.bytes.length && uvIndex < uPlane.bytes.length && uvIndex < vPlane.bytes.length) {
+              final yValue = yPlane.bytes[yIndex];
+              final uValue = uPlane.bytes[uvIndex];
+              final vValue = vPlane.bytes[uvIndex];
+              
+              // YUV到RGB转换
+              final r = (yValue + 1.402 * (vValue - 128)).clamp(0, 255).toInt();
+              final g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255).toInt();
+              final b = (yValue + 1.772 * (uValue - 128)).clamp(0, 255).toInt();
+              
+              image.setPixelRgb(x, y, r, g, b);
+            }
+          }
+        }
+      } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
+        // BGRA8888转换
+        final bytes = cameraImage.planes[0].bytes;
+        final width = cameraImage.width;
+        final height = cameraImage.height;
+        
+        image = img.Image(width: width, height: height);
+        
+        for (int y = 0; y < height; y++) {
+          for (int x = 0; x < width; x++) {
+            final index = (y * width + x) * 4;
+            if (index + 3 < bytes.length) {
+              final b = bytes[index];
+              final g = bytes[index + 1];
+              final r = bytes[index + 2];
+              // Alpha通道被忽略
+              
+              image.setPixelRgb(x, y, r, g, b);
+            }
+          }
+        }
+      }
+      
+      return image;
+    } catch (e) {
+      print('$_tag: 图像转换失败 - $e');
+      return null;
+    }
+  }
+
+  /// 中心裁剪图像
+  img.Image _centerCrop(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    final size = math.min(width, height);
+    
+    final startX = (width - size) ~/ 2;
+    final startY = (height - size) ~/ 2;
+    
+    return img.copyCrop(image, x: startX, y: startY, width: size, height: size);
+  }
+
+  /// 计算HSV直方图
+  List<int> _calculateHsvHistogram(img.Image image) {
+    final histogram = List<int>.filled(_histogramBins, 0);
+    
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final pixel = image.getPixel(x, y);
+        final r = pixel.r / 255.0;
+        final g = pixel.g / 255.0;
+        final b = pixel.b / 255.0;
+        
+        // RGB转HSV
+        final max = math.max(r, math.max(g, b));
+        final min = math.min(r, math.min(g, b));
+        final delta = max - min;
+        
+        double h = 0.0;
+        if (delta != 0) {
+          if (max == r) {
+            h = 60 * (((g - b) / delta) % 6);
+          } else if (max == g) {
+            h = 60 * (((b - r) / delta) + 2);
+          } else {
+            h = 60 * (((r - g) / delta) + 4);
+          }
+        }
+        
+        if (h < 0) h += 360;
+        
+        // 将H值映射到直方图bin
+        final bin = (h / 360.0 * _histogramBins).floor().clamp(0, _histogramBins - 1);
+        histogram[bin]++;
+      }
+    }
+    
+    return histogram;
+  }
+
+  /// 比较两个直方图的相似度（巴氏系数）
+  double _compareHistograms(List<int> hist1, List<int> hist2) {
+    if (hist1.length != hist2.length) return 1.0;
+    
+    // 归一化直方图
+    final sum1 = hist1.reduce((a, b) => a + b);
+    final sum2 = hist2.reduce((a, b) => a + b);
+    
+    if (sum1 == 0 || sum2 == 0) return 1.0;
+    
+    final normalized1 = hist1.map((e) => e / sum1).toList();
+    final normalized2 = hist2.map((e) => e / sum2).toList();
+    
+    // 计算巴氏系数
+    double bhattacharyya = 0.0;
+    for (int i = 0; i < normalized1.length; i++) {
+      bhattacharyya += math.sqrt(normalized1[i] * normalized2[i]);
+    }
+    
+    // 巴氏距离 = -ln(巴氏系数)
+    return -math.log(bhattacharyya.clamp(1e-10, 1.0));
+  }
+
+  /// 基于HSV特征检测页面是否变化
+  bool _isPageChangedHSV(img.Image? previousImage, img.Image currentImage) {
+    final startTime = DateTime.now();
+    
+    try {
+      // 如果没有前一帧图像，认为是页面变化
+      if (previousImage == null) {
+        _currentHsvSimilarity = 1.0;
+        return true;
+      }
+      
+      // 裁剪中央区域
+      final prevCenter = _centerCrop(previousImage);
+      final currentCenter = _centerCrop(currentImage);
+      
+      // 计算HSV直方图
+      final hist1 = _calculateHsvHistogram(prevCenter);
+      final hist2 = _calculateHsvHistogram(currentCenter);
+      
+      // 比较直方图相似度
+      final similarity = _compareHistograms(hist1, hist2);
+      _currentHsvSimilarity = similarity;
+      
+      final endTime = DateTime.now();
+      final elapsed = endTime.difference(startTime).inMilliseconds;
+      
+      print('$_tag: HSV相似度: ${similarity.toStringAsFixed(3)}, 耗时: ${elapsed}ms');
+      
+      // 如果相似度大于阈值，认为是页面变化
+      return similarity > _hsvThreshold;
+      
+    } catch (e) {
+      print('$_tag: HSV检测失败 - $e');
+      _currentHsvSimilarity = 0.0;
+      return false;
+    }
+  }
+
   /// 释放资源
   void dispose() {
     stopDetection();
@@ -630,6 +847,8 @@ class PageTurnDetector {
     _textExtractionService = null;
     _lastCameraImage = null;
     _isExtractingText = false;
+    _previousImage = null;
+    _useHsvDetection = false;
     print('$_tag: 资源已释放');
   }
 
@@ -637,6 +856,8 @@ class PageTurnDetector {
   bool get isModelLoaded => _isModelLoaded;
   bool get isDetecting => _isDetecting;
   bool get isProcessing => _isProcessing; // 新增：检查是否正在处理
+  bool get useHsvDetection => _useHsvDetection; // HSV检测是否启用
   double get lastSimilarity => _currentSimilarity;
+  double get lastHsvSimilarity => _currentHsvSimilarity; // HSV相似度
   double get averageSimilarity => _currentSimilarity;
 } 
