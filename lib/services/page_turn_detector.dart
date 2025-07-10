@@ -315,7 +315,7 @@ class PageTurnDetector {
       // 检测逻辑：结合ONNX特征检测和HSV检测
       bool isPageChangedFeature = false;
       bool isPageChangedHSV = false;
-      
+
       // ONNX特征检测
       if (result != null && _isModelLoaded) {
         isPageChangedFeature = _isPageChangedFeature(_previousFeature, result);
@@ -568,9 +568,9 @@ class PageTurnDetector {
         if (srcIndex < yPlane.bytes.length) {
           yValue = yPlane.bytes[srcIndex] / 255.0;
         }
-        
+          
         // 归一化并复制到RGB三个通道
-        final normalizedValue = (yValue - _mean[0]) / _std[0];
+          final normalizedValue = (yValue - _mean[0]) / _std[0];
         inputData[dataIndex++] = normalizedValue; // R
         inputData[dataIndex++] = normalizedValue; // G  
         inputData[dataIndex++] = normalizedValue; // B
@@ -608,8 +608,8 @@ class PageTurnDetector {
           g = bytes[srcIndex + 1] / 255.0;
           r = bytes[srcIndex + 2] / 255.0;
         }
-        
-        // ImageNet标准化
+          
+          // ImageNet标准化
         rChannel[channelIndex] = (r - _mean[0]) / _std[0];
         gChannel[channelIndex] = (g - _mean[1]) / _std[1];
         bChannel[channelIndex] = (b - _mean[2]) / _std[2];

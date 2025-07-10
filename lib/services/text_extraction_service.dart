@@ -20,6 +20,7 @@ class TextExtractionService {
   
   // 回调函数
   Function(String)? onTextExtracted;
+  Function(String)? onTextChunk;  // 流式文本片段回调
   Function(String)? onError;
   Function(String)? onStatusChanged;
   
@@ -164,40 +165,74 @@ class TextExtractionService {
         'max_tokens': 4000,
         'temperature': 0.1,
         'top_p': 0.9,
-        'stream': false
+        'stream': true
       };
       
-      debugPrint('$_tag: 开始调用豆包模型API...');
+      debugPrint('$_tag: 开始调用豆包模型API（流式）...');
       
-      // 发送请求
-      final response = await _dio.post(
-        '',
-        data: requestData,
-      );
+      StringBuffer fullText = StringBuffer();
       
-      debugPrint('$_tag: API调用成功，状态码: ${response.statusCode}');
-      
-      if (response.statusCode == 200) {
-        final responseData = response.data;
+      try {
+        // 发送流式请求
+        final response = await _dio.post<ResponseBody>(
+          '',
+          data: requestData,
+          options: Options(responseType: ResponseType.stream),
+        );
         
-        // 解析响应
-        if (responseData['choices'] != null && 
-            responseData['choices'].isNotEmpty &&
-            responseData['choices'][0]['message'] != null) {
+        if (response.statusCode == 200 && response.data != null) {
+          // 处理流式响应  
+          await for (final bytes in response.data!.stream) {
+            final chunk = utf8.decode(bytes);
+            final lines = chunk.split('\n');
+            
+            for (final line in lines) {
+              if (line.trim().isEmpty) continue;
+              
+              // 处理 Server-Sent Events 格式
+              if (line.startsWith('data: ')) {
+                final jsonString = line.substring(6).trim();
+                if (jsonString == '[DONE]') {
+                  debugPrint('$_tag: 流式响应完成');
+                  break;
+                }
+                
+                try {
+                  final data = json.decode(jsonString);
+                  if (data['choices'] != null && 
+                      data['choices'].isNotEmpty &&
+                      data['choices'][0]['delta'] != null &&
+                      data['choices'][0]['delta']['content'] != null) {
+                    
+                    final content = data['choices'][0]['delta']['content'];
+                    if (content != null && content.toString().isNotEmpty) {
+                      fullText.write(content);
+                      
+                      // 触发流式文本片段回调
+                      onTextChunk?.call(content.toString());
+                      debugPrint('$_tag: 接收文本片段: "${content.toString()}"');
+                    }
+                  }
+                } catch (e) {
+                  debugPrint('$_tag: 解析流式响应失败: $e, 内容: $jsonString');
+                }
+              }
+            }
+          }
           
-          final content = responseData['choices'][0]['message']['content'];
-          
-          if (content != null && content.toString().trim().isNotEmpty) {
-            debugPrint('$_tag: 文本提取成功，内容长度: ${content.toString().length}');
-            return content.toString().trim();
+          final finalText = fullText.toString().trim();
+          if (finalText.isNotEmpty) {
+            debugPrint('$_tag: 流式文本提取成功，总长度: ${finalText.length}');
+            return finalText;
           } else {
-            throw Exception('API返回内容为空');
+            throw Exception('流式API返回内容为空');
           }
         } else {
-          throw Exception('API返回格式错误');
+          throw Exception('流式API调用失败: ${response.statusCode}');
         }
-      } else {
-        throw Exception('API调用失败: ${response.statusCode}');
+      } catch (e) {
+        debugPrint('$_tag: 流式API处理失败: $e');
+        throw e;
       }
       
     } catch (e) {

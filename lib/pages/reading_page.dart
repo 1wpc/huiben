@@ -3,6 +3,8 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/page_turn_detector.dart';
 import '../services/text_extraction_service.dart';
+import '../services/xunfei_tts_service.dart';
+import '../services/sentence_segmenter.dart';
 import '../utilis/env.dart';
 
 // 阅读页面 - 包含摄像头功能和翻页检测
@@ -19,6 +21,8 @@ class _ReadingPageState extends State<ReadingPage> {
   CameraController? _controller;
   PageTurnDetector? _pageTurnDetector;
   TextExtractionService? _textExtractionService;
+  XunfeiTTSService? _ttsService;
+  SentenceSegmenter? _sentenceSegmenter;
   
   bool _isReading = false;
   String _statusText = '准备开始阅读';
@@ -29,6 +33,9 @@ class _ReadingPageState extends State<ReadingPage> {
   String _lastDetectionTime = '';
   String _extractedText = ''; // 存储提取的文本
   bool _isTextExtractionEnabled = false; // 文本提取服务是否可用
+  bool _isTTSEnabled = false; // TTS服务是否可用
+  bool _isTTSPlaying = false; // TTS是否正在播放
+  String _currentSentence = ''; // 当前正在朗读的句子
   bool _useHsvDetection = false; // HSV检测开关
   double _currentHsvSimilarity = 0.0; // HSV相似度
 
@@ -41,6 +48,8 @@ class _ReadingPageState extends State<ReadingPage> {
   Future<void> _initializeServices() async {
     await _initializeCamera();
     await _initializeTextExtractionService();
+    await _initializeTTSService();
+    await _initializeSentenceSegmenter();
     await _initializePageTurnDetector();
   }
 
@@ -112,6 +121,88 @@ class _ReadingPageState extends State<ReadingPage> {
     }
   }
 
+  Future<void> _initializeTTSService() async {
+    try {
+      _ttsService = XunfeiTTSService();
+      
+      // 注意：这里暂时使用占位符，实际使用时需要在.env文件中配置真实的讯飞TTS参数
+      final success = await _ttsService!.init(
+        appId: Env.xunfeiAppId,     // 请在.env中配置 XUNFEI_APP_ID
+        apiKey: Env.xunfeiApiKey,   // 请在.env中配置 XUNFEI_API_KEY  
+        apiSecret: Env.xunfeiApiSecret, // 请在.env中配置 XUNFEI_API_SECRET
+      );
+      
+      setState(() {
+        _isTTSEnabled = success;
+        if (success) {
+          debugPrint('TTS服务初始化成功');
+        } else {
+          debugPrint('TTS服务初始化失败');
+        }
+      });
+      
+      // 设置TTS回调
+      _ttsService!.onStatusChanged = (status) {
+        debugPrint('TTS状态: $status');
+      };
+      
+      _ttsService!.onError = (error) {
+        debugPrint('TTS错误: $error');
+      };
+      
+      _ttsService!.onPlaybackComplete = () {
+        setState(() {
+          _isTTSPlaying = false;
+          _currentSentence = '';
+        });
+        debugPrint('TTS播放完成');
+      };
+      
+    } catch (e) {
+      setState(() {
+        _isTTSEnabled = false;
+      });
+      debugPrint('TTS服务初始化异常: $e');
+    }
+  }
+
+  Future<void> _initializeSentenceSegmenter() async {
+    try {
+      _sentenceSegmenter = SentenceSegmenter(
+        minSentenceLength: 8,
+        maxSentenceLength: 150,
+        timeoutDuration: const Duration(seconds: 3),
+      );
+      
+      // 设置句子完成回调
+      _sentenceSegmenter!.onSentenceComplete = (sentence) {
+        debugPrint('完整句子: $sentence');
+        
+        // 如果TTS服务可用且不在播放中，开始朗读
+        if (_isTTSEnabled && !_isTTSPlaying && _ttsService != null) {
+          setState(() {
+            _isTTSPlaying = true;
+            _currentSentence = sentence;
+          });
+          
+          _ttsService!.synthesizeAndPlay(sentence);
+        }
+      };
+      
+      // 设置部分文本回调（用于实时显示）
+      _sentenceSegmenter!.onPartialText = (text) {
+        setState(() {
+          _extractedText = text;
+        });
+      };
+      
+      debugPrint('句子分段器初始化成功');
+      
+    } catch (e) {
+      debugPrint('句子分段器初始化异常: $e');
+    }
+  }
+
   Future<void> _initializePageTurnDetector() async {
     _pageTurnDetector = PageTurnDetector();
     
@@ -153,23 +244,29 @@ class _ReadingPageState extends State<ReadingPage> {
 
     // 设置文本提取回调
     _pageTurnDetector!.onTextExtracted = (text) {
-      setState(() {
-        _extractedText = text;
-      });
-      print('提取的文本: $text');
-      // 可以在这里添加更多的文本处理逻辑，比如语音朗读
+      debugPrint('完整文本提取完成: $text');
+      // 强制输出句子分段器缓冲区内容
+      _sentenceSegmenter?.flush();
     };
 
     _pageTurnDetector!.onTextExtractionError = (error) {
       setState(() {
         _extractedText = '文本提取失败: $error';
       });
-      print('文本提取错误: $error');
+      debugPrint('文本提取错误: $error');
+      // 清空句子分段器缓冲区
+      _sentenceSegmenter?.clear();
     };
 
     // 设置文本提取服务（如果可用）
     if (_isTextExtractionEnabled && _textExtractionService != null) {
       _pageTurnDetector!.setTextExtractionService(_textExtractionService!);
+      
+      // 设置流式文本回调，将文本片段输入到句子分段器
+      _textExtractionService!.onTextChunk = (textChunk) {
+        debugPrint('接收文本片段: $textChunk');
+        _sentenceSegmenter?.addText(textChunk);
+      };
     }
 
     // 初始化模型
@@ -223,6 +320,8 @@ class _ReadingPageState extends State<ReadingPage> {
   void _stopReading() {
     setState(() {
       _isReading = false;
+      _isTTSPlaying = false;
+      _currentSentence = '';
       _statusText = '阅读已停止 - 共检测到 $_pageCount 页';
     });
 
@@ -231,6 +330,12 @@ class _ReadingPageState extends State<ReadingPage> {
     
     // 停止图像流
     _controller?.stopImageStream();
+    
+    // 停止TTS播放
+    _ttsService?.stopPlayback();
+    
+    // 清空句子分段器
+    _sentenceSegmenter?.clear();
   }
 
 
@@ -267,6 +372,8 @@ class _ReadingPageState extends State<ReadingPage> {
     _controller?.dispose();
     _pageTurnDetector?.dispose();
     _textExtractionService?.dispose();
+    _ttsService?.dispose();
+    _sentenceSegmenter?.dispose();
     super.dispose();
   }
 
@@ -310,7 +417,7 @@ class _ReadingPageState extends State<ReadingPage> {
             padding: const EdgeInsets.all(16),
             color: Colors.grey[100],
             child: Column(
-              children: [                
+              children: [
                 if (_isReading) ...[
                   // 页面计数和检测状态
                   Row(
@@ -361,6 +468,22 @@ class _ReadingPageState extends State<ReadingPage> {
                           const SizedBox(height: 4),
                           Text(_isTextExtractionEnabled ? '文本提取' : '文本未启用',
                                style: const TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                      Column(
+                        children: [
+                          Icon(
+                            _isTTSPlaying ? Icons.volume_up : 
+                            (_isTTSEnabled ? Icons.volume_off : Icons.volume_mute),
+                            color: _isTTSPlaying ? Colors.red : 
+                                   (_isTTSEnabled ? Colors.blue : Colors.grey),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _isTTSPlaying ? '朗读中' : 
+                            (_isTTSEnabled ? 'TTS就绪' : 'TTS未启用'),
+                            style: const TextStyle(fontSize: 12)
+                          ),
                         ],
                       ),
                     ],
@@ -457,6 +580,58 @@ class _ReadingPageState extends State<ReadingPage> {
                       style: const TextStyle(
                         fontSize: 14,
                         height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          
+          // 当前朗读句子显示区域
+          if (_currentSentence.isNotEmpty && _isTTSPlaying) ...[
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.red[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.red[200]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.volume_up, color: Colors.red[700], size: 20),
+                      const SizedBox(width: 8),
+                      Text(
+                        '正在朗读:',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.red[700],
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.grey[300]!),
+                    ),
+                    child: Text(
+                      _currentSentence,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        height: 1.4,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
