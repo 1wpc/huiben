@@ -6,17 +6,24 @@ import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 
+/// 支持的视觉模型类型
+enum VisualModelType { doubao, glm }
+
 /// 文本提取服务
 /// 使用豆包模型从图片中提取朗读内容文字
 class TextExtractionService {
   static const String _tag = 'TextExtractionService';
   
   // 豆包模型API配置
-  static const String _apiUrl = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
-  static const String _modelId = 'doubao-seed-1-6-250615';
+  static const String _doubaoApiUrl = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+  static const String _doubaoModelId = 'doubao-seed-1-6-250615';
+  // GLM视觉模型API配置（假设为本地或远程API，需用户配置）
+  static const String _glmApiUrl = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'; // 可根据实际情况修改
   
   late Dio _dio;
   String? _apiKey;
+  VisualModelType _modelType = VisualModelType.doubao;
+  String? _glmPrompt;
   
   // 回调函数
   Function(String)? onTextExtracted;
@@ -24,15 +31,14 @@ class TextExtractionService {
   Function(String)? onError;
   Function(String)? onStatusChanged;
   
-  /// 初始化服务
-  Future<bool> init({required String apiKey}) async {
+  /// 初始化服务，支持选择模型类型
+  Future<bool> init({required String apiKey, VisualModelType modelType = VisualModelType.doubao}) async {
     try {
       _apiKey = apiKey;
-      
-      // 初始化Dio
+      _modelType = modelType;
       _dio = Dio();
       _dio.options = BaseOptions(
-        baseUrl: _apiUrl,
+        baseUrl: modelType == VisualModelType.doubao ? _doubaoApiUrl : _glmApiUrl,
         connectTimeout: const Duration(seconds: 30),
         receiveTimeout: const Duration(seconds: 60),
         headers: {
@@ -51,7 +57,7 @@ class TextExtractionService {
       }
       
       onStatusChanged?.call('文本提取服务已初始化');
-      debugPrint('$_tag: 服务初始化成功');
+      debugPrint('$_tag: 服务初始化成功, 当前模型: $_modelType');
       return true;
       
     } catch (e) {
@@ -61,11 +67,11 @@ class TextExtractionService {
     }
   }
   
-  /// 从相机图像中提取文本
+  /// 从相机图像中提取文本（根据模型类型自动选择API）
   Future<String?> extractTextFromCameraImage(CameraImage cameraImage) async {
     try {
       onStatusChanged?.call('正在处理图像...');
-      debugPrint('$_tag: 开始处理相机图像 - 格式: ${cameraImage.format.group}, 尺寸: ${cameraImage.width}x${cameraImage.height}');
+      debugPrint('$_tag: 开始处理相机图像 - 格式:  [32m${cameraImage.format.group} [0m, 尺寸: ${cameraImage.width}x${cameraImage.height}');
       
       // 将CameraImage转换为Uint8List
       final imageBytes = await _convertCameraImageToBytes(cameraImage);
@@ -87,8 +93,12 @@ class TextExtractionService {
       final base64Image = base64Encode(imageBytes);
       debugPrint('$_tag: Base64编码完成 - 长度: ${base64Image.length}');
       
-      // 调用豆包模型API
-      final extractedText = await _callDoubaoAPI(base64Image);
+      String? extractedText;
+      if (_modelType == VisualModelType.doubao) {
+        extractedText = await _callDoubaoAPI(base64Image);
+      } else {
+        extractedText = await _callGLMAPI(base64Image);
+      }
       
       if (extractedText != null) {
         onTextExtracted?.call(extractedText);
@@ -106,7 +116,7 @@ class TextExtractionService {
     }
   }
   
-  /// 从图片文件中提取文本
+  /// 从图片文件中提取文本（根据模型类型自动选择API）
   Future<String?> extractTextFromImageBytes(Uint8List imageBytes) async {
     try {
       onStatusChanged?.call('正在分析图片...');
@@ -114,8 +124,12 @@ class TextExtractionService {
       // 转换为base64
       final base64Image = base64Encode(imageBytes);
       
-      // 调用豆包模型API
-      final extractedText = await _callDoubaoAPI(base64Image);
+      String? extractedText;
+      if (_modelType == VisualModelType.doubao) {
+        extractedText = await _callDoubaoAPI(base64Image);
+      } else {
+        extractedText = await _callGLMAPI(base64Image);
+      }
       
       if (extractedText != null) {
         onTextExtracted?.call(extractedText);
@@ -140,7 +154,7 @@ class TextExtractionService {
       
       // 构建请求体
       final requestData = {
-        'model': _modelId,
+        'model': _doubaoModelId,
         'messages': [
           {
             'role': 'system',
@@ -246,6 +260,94 @@ class TextExtractionService {
         debugPrint('$_tag: API调用异常 - $e');
         throw Exception('API调用异常: $e');
       }
+    }
+  }
+
+  /// 调用GLM视觉模型API
+  Future<String?> _callGLMAPI(String base64Image) async {
+    try {
+      onStatusChanged?.call('正在调用GLM视觉模型...');
+      // 构建GLM官方API请求体
+      final String modelName = 'glm-4v-flash'; // 可根据需要配置
+      final String apiKey = _apiKey ?? '';
+      final String imageData = 'data:image/jpeg;base64,$base64Image';
+      final requestData = {
+        'model': modelName,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {
+                'type': 'image_url',
+                'image_url': {'url': imageData}
+              },
+              {
+                'type': 'text',
+                'text': '请提取这张图中所示书或者绘本上的所有文字内容，并按照原文的格式整理输出，如果没有输出“没有文字”'
+              }
+            ]
+          }
+        ],
+        'stream': true
+      };
+      debugPrint('$_tag: 开始调用GLM视觉模型API...');
+      final response = await _dio.post(
+        '',
+        data: jsonEncode(requestData),
+        options: Options(
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $apiKey',
+          },
+          responseType: ResponseType.stream,
+        ),
+      );
+      if (response.statusCode == 200 && response.data != null) {
+        // 处理流式响应
+        StringBuffer fullText = StringBuffer();
+        await for (final bytes in response.data!.stream) {
+          final chunk = utf8.decode(bytes);
+          final lines = chunk.split('\n');
+          for (final line in lines) {
+            if (line.trim().isEmpty) continue;
+            if (line.startsWith('data: ')) {
+              final jsonString = line.substring(6).trim();
+              if (jsonString == '[DONE]') {
+                debugPrint('$_tag: GLM流式响应完成');
+                break;
+              }
+              try {
+                final data = json.decode(jsonString);
+                if (data['choices'] != null &&
+                    data['choices'].isNotEmpty &&
+                    data['choices'][0]['delta'] != null &&
+                    data['choices'][0]['delta']['content'] != null) {
+                  final content = data['choices'][0]['delta']['content'];
+                  if (content != null && content.toString().isNotEmpty) {
+                    fullText.write(content);
+                    onTextChunk?.call(content.toString());
+                    debugPrint('$_tag: GLM片段: ${content.toString()}');
+                  }
+                }
+              } catch (e) {
+                debugPrint('$_tag: 解析GLM流式响应失败: $e, 内容: $jsonString');
+              }
+            }
+          }
+        }
+        final finalText = fullText.toString().trim();
+        if (finalText.isNotEmpty) {
+          debugPrint('$_tag: GLM流式文本提取成功，总长度: ${finalText.length}');
+          return finalText;
+        } else {
+          throw Exception('GLM流式API返回内容为空');
+        }
+      } else {
+        throw Exception('GLM API调用失败: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('$_tag: GLM API调用异常 - $e');
+      throw Exception('GLM API调用异常: $e');
     }
   }
   

@@ -38,6 +38,11 @@ class _ReadingPageState extends State<ReadingPage> {
   String _currentSentence = ''; // 当前正在朗读的句子
   bool _useHsvDetection = false; // HSV检测开关
   double _currentHsvSimilarity = 0.0; // HSV相似度
+  VisualModelType _visualModelType = VisualModelType.doubao;
+  final Map<VisualModelType, String> _visualModelNames = {
+    VisualModelType.doubao: '豆包视觉模型',
+    VisualModelType.glm: 'GLM视觉模型',
+  };
 
   @override
   void initState() {
@@ -94,9 +99,10 @@ class _ReadingPageState extends State<ReadingPage> {
     try {
       _textExtractionService = TextExtractionService();
       
-      final apiKey = Env.doubaoApiKey; 
+      final doubaoApiKey = Env.doubaoApiKey; 
+      final glmApiKey = Env.glmApiKey;
       
-      final success = await _textExtractionService!.init(apiKey: apiKey);
+      final success = await _textExtractionService!.init(apiKey: _visualModelType == VisualModelType.doubao ? doubaoApiKey : glmApiKey, modelType: _visualModelType);
       
       setState(() {
         _isTextExtractionEnabled = success;
@@ -121,11 +127,24 @@ class _ReadingPageState extends State<ReadingPage> {
     }
   }
 
+  void _onVisualModelChanged(VisualModelType? type) async {
+    if (type == null) return;
+    setState(() {
+      _visualModelType = type;
+      _isTextExtractionEnabled = false;
+      _statusText = '切换视觉模型，正在重新初始化...';
+    });
+    await _initializeTextExtractionService();
+    // 重新设置PageTurnDetector的文本提取服务
+    if (_pageTurnDetector != null && _textExtractionService != null) {
+      _pageTurnDetector!.setTextExtractionService(_textExtractionService!);
+    }
+  }
+
   Future<void> _initializeTTSService() async {
     try {
       _ttsService = XunfeiTTSService();
       
-      // 注意：这里暂时使用占位符，实际使用时需要在.env文件中配置真实的讯飞TTS参数
       final success = await _ttsService!.init(
         appId: Env.xunfeiAppId,     // 请在.env中配置 XUNFEI_APP_ID
         apiKey: Env.xunfeiApiKey,   // 请在.env中配置 XUNFEI_API_KEY  
@@ -191,9 +210,10 @@ class _ReadingPageState extends State<ReadingPage> {
       
       // 设置部分文本回调（用于实时显示）
       _sentenceSegmenter!.onPartialText = (text) {
-        setState(() {
-          _extractedText = text;
-        });
+        // 移除不必要的 setState，因为提取文本不再显示
+        // setState(() {
+        //   _extractedText = text;
+        // });
       };
       
       debugPrint('句子分段器初始化成功');
@@ -410,6 +430,28 @@ class _ReadingPageState extends State<ReadingPage> {
                     ),
             ),
           ),
+          // 视觉模型选择区域
+          Container(
+            width: double.infinity,
+            color: Colors.grey[200],
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              children: [
+                const Text('视觉模型:', style: TextStyle(fontSize: 15)),
+                const SizedBox(width: 12),
+                DropdownButton<VisualModelType>(
+                  value: _visualModelType,
+                  items: VisualModelType.values.map((type) {
+                    return DropdownMenuItem<VisualModelType>(
+                      value: type,
+                      child: Text(_visualModelNames[type] ?? type.toString()),
+                    );
+                  }).toList(),
+                  onChanged: _isReading ? null : _onVisualModelChanged,
+                ),
+              ],
+            ),
+          ),
           
           // 检测信息显示区域
           Container(
@@ -419,7 +461,7 @@ class _ReadingPageState extends State<ReadingPage> {
             child: Column(
               children: [
                 if (_isReading) ...[
-                  // 页面计数和检测状态
+                  // 简化后的检测状态，只保留页面计数和TTS状态
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -429,45 +471,6 @@ class _ReadingPageState extends State<ReadingPage> {
                           const SizedBox(height: 4),
                           Text('第 $_pageCount 页', 
                                style: const TextStyle(fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                      Column(
-                        children: [
-                          const Icon(Icons.analytics, color: Colors.orange),
-                          const SizedBox(height: 4),
-                          Text(
-                            _isModelLoaded 
-                              ? 'ONNX: ${(_currentSimilarity * 100).toStringAsFixed(1)}%'
-                              : 'HSV: ${(_currentHsvSimilarity * 100).toStringAsFixed(1)}%',
-                            style: const TextStyle(fontSize: 12)
-                          ),
-                        ],
-                      ),
-                      Column(
-                        children: [
-                          Icon(
-                            _isModelLoaded ? Icons.check_circle : 
-                            (_useHsvDetection ? Icons.backup : Icons.error),
-                            color: _isModelLoaded ? Colors.green : 
-                                   (_useHsvDetection ? Colors.orange : Colors.red),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _isModelLoaded ? 'ONNX模式' : 
-                            (_useHsvDetection ? 'HSV模式' : '模型未加载'),
-                            style: const TextStyle(fontSize: 12)
-                          ),
-                        ],
-                      ),
-                      Column(
-                        children: [
-                          Icon(
-                            _isTextExtractionEnabled ? Icons.text_fields : Icons.text_fields_outlined,
-                            color: _isTextExtractionEnabled ? Colors.purple : Colors.grey,
-                          ),
-                          const SizedBox(height: 4),
-                          Text(_isTextExtractionEnabled ? '文本提取' : '文本未启用',
-                               style: const TextStyle(fontSize: 12)),
                         ],
                       ),
                       Column(
@@ -488,106 +491,11 @@ class _ReadingPageState extends State<ReadingPage> {
                       ),
                     ],
                   ),
-                  
-                  // 最后检测时间显示
-                  if (_lastDetectionTime.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.green[50],
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: Colors.green[200]!),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.schedule, size: 16, color: Colors.green),
-                          const SizedBox(width: 4),
-                          Text(
-                            '最后检测: $_lastDetectionTime',
-                            style: const TextStyle(fontSize: 12, color: Colors.green),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
                   const SizedBox(height: 8),
-                  
-                  // 相似度进度条
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _isModelLoaded ? 'ONNX稳定度:' : 'HSV稳定度:', 
-                        style: const TextStyle(fontSize: 12)
-                      ),
-                      const SizedBox(height: 4),
-                      LinearProgressIndicator(
-                        value: _isModelLoaded ? _currentSimilarity : (_currentHsvSimilarity / 2.0), // HSV值需要调整显示范围
-                        backgroundColor: Colors.grey[300],
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          (_isModelLoaded ? _currentSimilarity : (_currentHsvSimilarity / 2.0)) > 0.7 
-                            ? Colors.green : Colors.orange,
-                        ),
-                      ),
-                    ],
-                  ),
                 ],
               ],
             ),
           ),
-          
-          // 提取文本显示区域
-          if (_extractedText.isNotEmpty) ...[
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.symmetric(horizontal: 16),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.blue[50],
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.blue[200]!),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.text_fields, color: Colors.blue[700], size: 20),
-                      const SizedBox(width: 8),
-                      Text(
-                        '提取的文本内容:',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.blue[700],
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Colors.grey[300]!),
-                    ),
-                    child: Text(
-                      _extractedText,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-          ],
           
           // 当前朗读句子显示区域
           if (_currentSentence.isNotEmpty && _isTTSPlaying) ...[

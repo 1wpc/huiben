@@ -15,4 +15,7 @@ abstract class Env {
     
     @EnviedField(varName: 'XUNFEI_API_SECRET', obfuscate: true)
     static final String xunfeiApiSecret = _Env.xunfeiApiSecret;
+
+    @EnviedField(varName: 'GLM_APIKEY', obfuscate: true)
+    static final String glmApiKey = _Env.glmApiKey;
 }

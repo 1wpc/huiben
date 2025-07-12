@@ -27,53 +27,6 @@
 - **边界检查**：防止数组越界导致的崩溃
 - **及时释放**：使用 try-finally 确保资源释放
 
-### 使用建议
-
-```dart
-final detector = PageTurnDetector();
-
-// 初始化模型
-await detector.initModel();
-
-// 设置回调
-detector.onPageTurnDetected = (message) {
-  print('翻页检测: $message');
-};
-
-detector.onSimilarityUpdated = (similarity) {
-  // 只在需要时更新UI，避免频繁刷新
-  if (similarity < 0.8) {
-    updateUI(similarity);
-  }
-};
-
-// 在相机回调中使用
-void onCameraFrame(CameraImage image) {
-  // 检测器内部已有频率控制，直接调用即可
-  detector.processFrame(image);
-}
-
-// 记得释放资源
-@override
-void dispose() {
-  detector.dispose();
-  super.dispose();
-}
-```
-
-### 性能监控
-
-优化后的检测器提供了状态监控：
-
-```dart
-// 检查处理状态
-if (detector.isProcessing) {
-  print('正在处理中，跳过当前帧');
-}
-
-// 监控相似度变化
-print('当前相似度: ${detector.lastSimilarity}');
-```
 
 ## 项目结构
 
@@ -108,7 +61,11 @@ cd huiben
 flutter pub get
 ```
 
-3. 运行应用：
+3. 配置密钥：
+   参考http://neuronx.top/2025/07/04/Flutter%E5%BC%80%E5%8F%91-%E5%AF%86%E9%92%A5%E4%BF%9D%E6%8A%A4/
+   配置自己的apikey等
+
+4. 运行应用：
 ```bash
 flutter run
 ```
@@ -139,10 +96,3 @@ static const double _similarityThreshold = 0.6; // 降低阈值
 2. 在应用后台时停止检测：`detector.stopDetection()`
 3. 监控内存使用，必要时重启检测器
 
-## 贡献
-
-欢迎提交 Issue 和 Pull Request 来改进项目。
-
-## 许可证
-
-[添加你的许可证信息]
